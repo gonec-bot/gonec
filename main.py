@@ -450,7 +450,6 @@ async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 ### RENDER ###
-# --- Код для веб-сервера, чтобы Render был доволен ---
 app = Flask('')
 
 @app.route('/')
@@ -462,22 +461,25 @@ def run_server():
     """Запускает веб-сервер."""
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-### RENDER ###
-
 
 def main() -> None:
-    ### RENDER ###
-    # ШАГ 2: Создаем и устанавливаем новый event loop для этого потока
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    ### RENDER ###
+    # --- ШАГ 1: Запускаем веб-сервер в фоновом потоке ---
+    # Он простой и не требует быть главным.
+    # daemon=True означает, что этот поток автоматически завершится, когда завершится основной.
+    server_thread = Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()
+    print("Веб-сервер для Render запущен в фоновом потоке...")
 
+    # --- ШАГ 2: Запускаем бота в основном (главном) потоке ---
+    # Теперь он может делать всё, что ему нужно, включая обработку сигналов.
     try:
-        print("Инициализация приложения Telegram...")
+        print("Инициализация приложения Telegram в основном потоке...")
         request = HTTPXRequest(connect_timeout=10.0, read_timeout=60.0, pool_timeout=None)
         application = (Application.builder().token(TOKEN).job_queue(JobQueue()).request(request).build())
         
         print("Добавление обработчиков...")
+        # ... (здесь все ваши application.add_handler)
         application.add_handler(TypeHandler(Update, track_user_activity), group=-1)
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("say", say_command))
@@ -495,7 +497,6 @@ def main() -> None:
 
         print("Бот запущен в режиме polling...")
         application.run_polling()
-        print("Polling остановлен.")
 
     except Exception as e:
         print("!!! КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ БОТА !!!")
@@ -506,10 +507,4 @@ def main() -> None:
 
 # --- Точка входа в программу ---
 if __name__ == "__main__":
-    # Запускаем бота в отдельном, фоновом потоке
-    bot_thread = Thread(target=main)
-    bot_thread.start()
-    
-    # Запускаем веб-сервер в основном потоке.
-    print("Веб-сервер для Render запущен...")
-    run_server()
+    main()
