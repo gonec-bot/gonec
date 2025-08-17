@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from datetime import datetime, timedelta
 import random
+import asyncio
 from abc import ABC, abstractmethod
 from game_base import Game, UserDataManager # Если вынесли UserDataManager
 from minigames import DiceGame, RouletteGame, CoinFlipGame # Если вынесли UserDataManager
@@ -465,32 +466,50 @@ def run_server():
 
 
 def main() -> None:
-    request = HTTPXRequest(connect_timeout=10.0, read_timeout=60.0, pool_timeout=None)
-    application = (Application.builder().token(TOKEN).job_queue(JobQueue()).request(request).build())
-    application.add_handler(TypeHandler(Update, track_user_activity), group=-1)
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("say", say_command))
-    application.add_handler(CommandHandler("stata", stata_command))
-    application.add_handler(CallbackQueryHandler(nav_handler, pattern='^nav:'))
-    application.add_handler(CallbackQueryHandler(subscription_handler, pattern='^sub:'))
-    application.add_handler(CallbackQueryHandler(show_public_stats, pattern='^get_public_stats$'))
-    application.add_handler(CallbackQueryHandler(contact_admin_start_handler, pattern='^contact:'))
-    application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern='^do_nothing$'))
-    application.add_handler(CallbackQueryHandler(work_handler, pattern='^game:work$'))
-    application.add_handler(CallbackQueryHandler(game_start_handler, pattern=r'^game:start:'))
-    application.add_handler(CallbackQueryHandler(game_modify_bet_handler, pattern=r'^game:modify:'))
-    application.add_handler(CallbackQueryHandler(game_play_handler, pattern=r'^game:play:'))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_router))
+    ### RENDER ###
+    # ШАГ 2: Создаем и устанавливаем новый event loop для этого потока
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    ### RENDER ###
 
-    print("Бот запущен в режиме polling...")
-    application.run_polling()
+    try:
+        print("Инициализация приложения Telegram...")
+        request = HTTPXRequest(connect_timeout=10.0, read_timeout=60.0, pool_timeout=None)
+        application = (Application.builder().token(TOKEN).job_queue(JobQueue()).request(request).build())
+        
+        print("Добавление обработчиков...")
+        application.add_handler(TypeHandler(Update, track_user_activity), group=-1)
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("say", say_command))
+        application.add_handler(CommandHandler("stata", stata_command))
+        application.add_handler(CallbackQueryHandler(nav_handler, pattern='^nav:'))
+        application.add_handler(CallbackQueryHandler(subscription_handler, pattern='^sub:'))
+        application.add_handler(CallbackQueryHandler(show_public_stats, pattern='^get_public_stats$'))
+        application.add_handler(CallbackQueryHandler(contact_admin_start_handler, pattern='^contact:'))
+        application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern='^do_nothing$'))
+        application.add_handler(CallbackQueryHandler(work_handler, pattern='^game:work$'))
+        application.add_handler(CallbackQueryHandler(game_start_handler, pattern=r'^game:start:'))
+        application.add_handler(CallbackQueryHandler(game_modify_bet_handler, pattern=r'^game:modify:'))
+        application.add_handler(CallbackQueryHandler(game_play_handler, pattern=r'^game:play:'))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_router))
 
+        print("Бот запущен в режиме polling...")
+        application.run_polling()
+        print("Polling остановлен.")
 
-### RENDER ###
+    except Exception as e:
+        print("!!! КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ БОТА !!!")
+        print(f"Тип ошибки: {type(e).__name__}")
+        print(f"Сообщение: {e}")
+        import traceback
+        traceback.print_exc()
+
 # --- Точка входа в программу ---
 if __name__ == "__main__":
     # Запускаем бота в отдельном, фоновом потоке
     bot_thread = Thread(target=main)
     bot_thread.start()
+    
+    # Запускаем веб-сервер в основном потоке.
     print("Веб-сервер для Render запущен...")
     run_server()
