@@ -2,4 +2,6 @@ python-telegram-bot
 Flask[async]  # <-- ИСПРАВЛЕНО
 gunicorn
 python-dotenv
+requests
+
 python-telegram-bot[job-queue]
