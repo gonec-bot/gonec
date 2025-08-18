@@ -10,10 +10,12 @@
 
 import logging
 import random
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from datetime import datetime, timedelta
 from abc import ABC, abstractmethod
+import requests
+import json
+import threading
+from telegram.ext import JobQueue
 
 # Импорты для тайп-хинтинга (не влияют на исполнение, но помогают в разработке)
 from typing import Dict, Any, Tuple, Optional
@@ -32,205 +34,174 @@ logger = logging.getLogger(__name__)
 # Чтобы добавить новое поле (например, 'achievements'), просто добавьте его сюда
 # с начальным значением. Код загрузки и сохранения подхватит его автоматически.
 DEFAULT_USER_STRUCTURE = {
-    'faction': 'None',
-    'first_seen': '',
-    'last_seen': '',
-    'interaction_count': 0,
-    'balance': 10000,
-    'last_stats_request_time': None,
-    'last_work_time': None,
-    'last_race_time': None
+    'faction': 'None',                   # Тип: str. 'None' - отличное значение по умолчанию.
+    'first_seen': '',                  # Тип: str. Будет установлен при первом контакте.
+    'last_seen': '',                   # Тип: str. Будет обновляться при каждом контакте.
+    'interaction_count': 0,              # Тип: int. Новый пользователь начинает с 0 взаимодействий.
+    'balance': 10000,                        # Тип: int. Новый пользователь начинает с нулевым балансом (или установите стартовый капитал, например, 100).
+    'last_stats_request_time': None,     # Тип: str. Время еще не было запрошено.
+    'last_work_time': None,              # Тип: str. Еще не работал.
+    'last_race_time': None               # Тип: str. Еще не участвовал в гонках.
 }
-
 
 # --- 3. КЛАСС УПРАВЛЕНИЯ ДАННЫМИ ---
 
 class UserDataManager:
     """
-    Управляет всеми операциями с данными пользователей (загрузка, сохранение, обновление).
-    Работает с XML-файлом для постоянного хранения информации.
-    Этот класс вынесен в game_base.py, чтобы избежать циклических импортов,
-    но в крупных проектах может находиться в отдельном файле (например, data_manager.py).
+    Управляет данными пользователей с кешированием в памяти и периодическим
+    сохранением в облако JSONBin.io.
     """
-    def __init__(self, file_path: str):
-        """
-        Инициализирует менеджер данных.
+    def __init__(self, api_key: str, bin_id: str):
+        self._api_key = api_key
+        self._bin_id = bin_id
+        self._api_url = f"https://api.jsonbin.io/v3/b/{self._bin_id}"
+        self._headers = {'X-Master-Key': self._api_key}
 
-        Args:
-            file_path (str): Путь к XML-файлу для хранения данных.
-        """
-        self.file_path = file_path
-        self.users = self._load()
+        # --- НОВЫЕ АТРИБУТЫ ДЛЯ ОТЛОЖЕННОГО СОХРАНЕНИЯ ---
+        self._is_dirty = False  # Флаг, который показывает, были ли изменения
+        self._save_lock = threading.Lock() # Замок, чтобы избежать гонки данных при сохранении
 
-    def _load(self) -> Dict[int, Dict[str, Any]]:
-        """
-        Загружает данные пользователей из XML-файла.
-        Безопасно обрабатывает отсутствующие поля для старых данных.
-        """
+        # Загружаем данные при старте
+        self._full_data_cache = self._load_bin()
+        self.users = self._full_data_cache.get('users', {})
+        logger.info(f"UserDataManager инициализирован. Загружено {len(self.users)} пользователей.")
+
+    def _load_bin(self) -> Dict[str, Any]:
+        """Загружает ВСЁ содержимое "бина" из JSONBin.io при старте."""
         try:
-            tree = ET.parse(self.file_path)
-            root = tree.getroot()
-            loaded_users = {}
-            for user_elem in root.findall('user'):
-                user_id = int(user_elem.get('id'))
-                user_data = {}
-                # Динамически загружаем все поля из нашей структуры
-                for key, default_value in DEFAULT_USER_STRUCTURE.items():
-                    node = user_elem.find(key)
-                    if node is not None and node.text is not None:
-                        # Пытаемся привести тип к тому, который указан в дефолтной структуре
-                        value_type = type(default_value)
-                        if value_type == bool:
-                            user_data[key] = node.text.lower() in ('true', '1', 'yes')
-                        elif value_type == int:
-                             user_data[key] = int(node.text)
-                        else:
-                             user_data[key] = node.text
-                    else:
-                        # Если поля нет в XML, берем значение по умолчанию
-                        user_data[key] = default_value
-                loaded_users[user_id] = user_data
-
-            logger.info(f"Успешно загружено {len(loaded_users)} пользователей из {self.file_path}")
-            return loaded_users
-        except (FileNotFoundError, ET.ParseError) as e:
-            logger.warning(f"Файл {self.file_path} не найден или поврежден ({e}). Будет создан новый.")
+            response = requests.get(f"{self._api_url}/latest", headers=self._headers, timeout=10)
+            response.raise_for_status()
+            data = response.json().get('record', {})
+            if 'users' in data and isinstance(data['users'], dict):
+                data['users'] = {int(k): v for k, v in data['users'].items()}
+            logger.info(f"Успешно загружены данные из JSONBin (ID: {self._bin_id})")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Сетевая ошибка при загрузке данных: {e}. Бот не может запуститься.")
+            raise ConnectionError("Не удалось загрузить данные из облака.")
+        except (json.JSONDecodeError, KeyError, ValueError):
+            logger.warning(f"Данные в JSONBin повреждены или пусты. Начинаем с пустой базы.")
             return {}
 
-    def _save(self) -> None:
+    def _mark_as_dirty(self) -> None:
         """
-        Сохраняет текущие данные всех пользователей в XML-файл.
-        Данные сохраняются в "красивом" виде с отступами.
+        Приватный метод. Просто помечает данные как "измененные".
+        Теперь это будет вызываться вместо прямого сохранения.
         """
-        root = ET.Element("users")
-        for user_id, data in self.users.items():
-            user_elem = ET.SubElement(root, "user", id=str(user_id))
-            # Динамически сохраняем все поля
-            for key, value in data.items():
-                # Пропускаем пустые значения (None), чтобы не засорять XML
-                if value is not None:
-                    ET.SubElement(user_elem, key).text = str(value)
+        self._is_dirty = True
 
-        # Преобразование в строку с форматированием
-        xml_str = ET.tostring(root, 'utf-8')
-        pretty_xml_str = minidom.parseString(xml_str).toprettyxml(indent="   ")
-        
-        try:
-            with open(self.file_path, "w", encoding='utf-8') as f:
-                f.write(pretty_xml_str)
-        except IOError as e:
-             logger.error(f"Не удалось сохранить данные в файл {self.file_path}: {e}")
+    def force_save(self) -> None:
+        """
+        Принудительно сохраняет данные в JSONBin.io, если они были изменены.
+        Этот метод будет вызываться по таймеру и при выключении бота.
+        """
+        # Блокируем, чтобы избежать ситуации, когда бот выключается
+        # прямо во время планового сохранения.
+        with self._save_lock:
+            if not self._is_dirty:
+                # Если изменений не было, ничего не делаем
+                return
+
+            logger.info("Обнаружены изменения. Начинаю синхронизацию с JSONBin.io...")
+            try:
+                self._full_data_cache['users'] = self.users
+                headers = {**self._headers, 'Content-Type': 'application/json'}
+                response = requests.put(self._api_url, headers=headers, json=self._full_data_cache, timeout=10)
+                response.raise_for_status()
+
+                # Если сохранение прошло успешно, сбрасываем флаг
+                self._is_dirty = False
+                logger.info("Синхронизация с JSONBin.io успешно завершена.")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить данные в JSONBin: {e}")
+
+    def start_autosave(self, job_queue: JobQueue, interval_seconds: int = 3600) -> None:
+        """
+        Запускает повторяющуюся задачу для автоматического сохранения данных.
+        """
+        # Важно! Мы передаем МЕТОД, а не его вызов. `force_save`, а не `force_save()`.
+        job_queue.run_repeating(
+            callback=lambda _: self.force_save(), # Используем лямбду, чтобы job_queue не передавал аргументы
+            interval=interval_seconds,
+            name="hourly_data_save"
+        )
+        logger.info(f"Автосохранение данных в облако настроено с интервалом {interval_seconds} секунд.")
+
+    # --- ТЕПЕРЬ ВСЕ МЕТОДЫ, МЕНЯЮЩИЕ ДАННЫЕ, ВЫЗЫВАЮТ _mark_as_dirty ---
 
     def update_user_activity(self, user_id: int) -> None:
-        """
-        Обновляет данные о последней активности пользователя.
-        Если пользователь новый, создает для него запись.
-        """
         current_time_iso = datetime.now().isoformat()
+        made_changes = False
         if user_id not in self.users:
             self.users[user_id] = DEFAULT_USER_STRUCTURE.copy()
             self.users[user_id]['first_seen'] = current_time_iso
             self.users[user_id]['interaction_count'] = 1
-            logger.info(f"Зарегистрирован новый пользователь: {user_id}")
+            made_changes = True
         else:
-            # Увеличиваем счетчик взаимодействий, даже если его не было
-            self.users[user_id]['interaction_count'] = self.users[user_id].get('interaction_count', 0) + 1
+            for key, default_value in DEFAULT_USER_STRUCTURE.items():
+                if key not in self.users[user_id]:
+                    self.users[user_id][key] = default_value
+                    made_changes = True # Обнаружили, что нужно было добавить поле
+            self.users[user_id]['interaction_count'] += 1
         
         self.users[user_id]['last_seen'] = current_time_iso
-        self._save()
-
-    def get_user_balance(self, user_id: int) -> int:
-        """Возвращает баланс пользователя. Если пользователя нет, вернет 0."""
-        return self.users.get(user_id, {}).get('balance', 0)
-
+        # Помечаем, что данные изменились
+        self._mark_as_dirty()
+    
     def update_user_balance(self, user_id: int, amount_change: int) -> None:
-        """
-        Изменяет баланс пользователя на указанную величину (может быть отрицательной).
-        
-        Args:
-            user_id (int): ID пользователя.
-            amount_change (int): Сумма, на которую нужно изменить баланс.
-        """
         if user_id in self.users:
-            # Убедимся, что поле баланса существует, перед тем как его менять
             current_balance = self.users[user_id].get('balance', DEFAULT_USER_STRUCTURE['balance'])
             self.users[user_id]['balance'] = current_balance + amount_change
-            logger.info(f"Баланс пользователя {user_id} изменен на {amount_change}. Новый баланс: {self.users[user_id]['balance']}")
-            self._save()
+            self._mark_as_dirty() # <-- ИЗМЕНЕНИЕ
         else:
             logger.warning(f"Попытка обновить баланс несуществующего пользователя: {user_id}")
-
-
+    
+    # ...и так далее для ВСЕХ методов, которые раньше вызывали _save()
     def check_and_apply_bankruptcy(self, user_id: int) -> bool:
-        """
-        Проверяет, не является ли пользователь банкротом (баланс < 100).
-        Если да, восстанавливает его баланс до 100 дукатов.
-
-        Returns:
-            bool: True, если банкротство было применено, иначе False.
-        """
         user_data = self.users.get(user_id)
         if user_data and user_data.get('balance', 0) < 100:
             self.users[user_id]['balance'] = 100
-            logger.info(f"Применена программа банкротства для пользователя {user_id}. Новый баланс: 100.")
-            self._save()
+            self._mark_as_dirty() # <-- ИЗМЕНЕНИЕ
             return True
         return False
 
     def _check_and_update_cooldown(self, user_id: int, cooldown_key: str, cooldown_duration: timedelta) -> Tuple[bool, Optional[timedelta]]:
-        """
-        Универсальный метод для проверки и обновления временных ограничений (кулдаунов).
-
-        Args:
-            user_id (int): ID пользователя.
-            cooldown_key (str): Ключ в словаре пользователя для хранения времени (e.g., 'last_work_time').
-            cooldown_duration (timedelta): Длительность кулдауна.
-
-        Returns:
-            tuple[bool, timedelta | None]: (True, None) если действие разрешено,
-                                            (False, time_left) если действие запрещено.
-        """
+        # ... (логика проверки кулдауна остается той же)
         user_data = self.users.get(user_id, {})
         last_action_str = user_data.get(cooldown_key)
-
         if last_action_str:
             last_action_time = datetime.fromisoformat(last_action_str)
             if datetime.now() < last_action_time + cooldown_duration:
                 time_left = (last_action_time + cooldown_duration) - datetime.now()
                 return False, time_left
-
-        # Убедимся, что пользователь существует, перед тем как записывать кулдаун
+        
         if user_id not in self.users:
-             self.update_user_activity(user_id)
-             
+             self.update_user_activity(user_id) # Этот метод уже вызывает _mark_as_dirty
+        
         self.users[user_id][cooldown_key] = datetime.now().isoformat()
-        self._save()
+        self._mark_as_dirty() # <-- ИЗМЕНЕНИЕ
         return True, None
 
-    # --- Публичные методы для проверки конкретных кулдаунов ---
+    def set_user_faction(self, user_id: int, faction: str) -> None:
+        if user_id in self.users:
+            self.users[user_id]['faction'] = faction
+            self._mark_as_dirty() # <-- ИЗМЕНЕНИЕ
+    
+    # Методы, которые только читают данные, не меняются
+    def get_user_balance(self, user_id: int) -> int:
+        return self.users.get(user_id, {}).get('balance', 0)
+
+    def get_all_users(self) -> Dict[int, Dict[str, Any]]:
+        return self.users
     
     def check_work_cooldown(self, user_id: int) -> Tuple[bool, Optional[timedelta]]:
-        """Проверяет кулдаун для работы (1 час)."""
         return self._check_and_update_cooldown(user_id, 'last_work_time', timedelta(hours=1))
 
     def check_stats_cooldown(self, user_id: int) -> Tuple[bool, Optional[timedelta]]:
-        """Проверяет кулдаун для запроса статистики (1 час)."""
         return self._check_and_update_cooldown(user_id, 'last_stats_request_time', timedelta(hours=1))
 
     def check_race_cooldown(self, user_id: int) -> Tuple[bool, Optional[timedelta]]:
-        """Проверяет кулдаун для участия в гонках (2 часа)."""
         return self._check_and_update_cooldown(user_id, 'last_race_time', timedelta(hours=2))
-
-    def set_user_faction(self, user_id: int, faction: str) -> None:
-        """Устанавливает фракцию для пользователя."""
-        if user_id in self.users:
-            self.users[user_id]['faction'] = faction
-            logger.info(f"Пользователь {user_id} выбрал фракцию '{faction}'.")
-            self._save()
-
-    def get_all_users(self) -> Dict[int, Dict[str, Any]]:
-        """Возвращает словарь со всеми пользователями и их данными."""
-        return self.users
 
 
 # --- 4. АБСТРАКТНЫЙ КЛАСС ИГРЫ ---

@@ -1,25 +1,16 @@
-# чтобы остановить программу нажми cntrl+C, тебе действительно не нужно завершать её аварийно...# чтобы остановить программу нажми cntrl+C, тебе действительно не нужно завершать её аварийно...
+# чтобы остановить программу нажми cntrl+C, тебе действительно не нужно завершать её аварийно...
 #main.py
-
-### RENDER ###
-# Импортируем Flask для веб-сервера и Thread для фоновой работы бота
-from flask import Flask
-from threading import Thread
-### RENDER ###
-
 from dotenv import load_dotenv
 import logging
 import os
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from datetime import datetime, timedelta
 import random
-import asyncio
 from abc import ABC, abstractmethod
 from game_base import Game, UserDataManager # Если вынесли UserDataManager
 from minigames import DiceGame, RouletteGame, CoinFlipGame # Если вынесли UserDataManager
 from blackjack_game import BlackjackGame
 from academic_race_game import AcademicRaceGame
+from typing import Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.request import HTTPXRequest
@@ -40,18 +31,25 @@ from telegram.ext import (
 load_dotenv()
 
 # Получаем токен бота и ID администратора из переменных окружения
+# Использование os.getenv() — безопасный способ, который не вызовет ошибку, если переменная отсутствует.
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID_TGBOT")
+JSONBIN_API_KEY=os.getenv("JSONBIN_API_KEY")
+JSONBIN_BIN_ID=os.getenv("JSONBIN_BIN_ID")
 
+# Критически важная проверка: убеждаемся, что токен и ID админа были найдены.
+# Если нет, бот не сможет запуститься, и мы выводим информативную ошибку.
 if not TOKEN:
     raise ValueError("Ошибка: Токен TELEGRAM_TOKEN не найден в переменных окружения.")
 if not ADMIN_ID:
     raise ValueError("Ошибка: ID администратора ADMIN_ID_TGBOT не найден в переменных окружения.")
+if not JSONBIN_API_KEY:
+    raise ValueError("Ошибка: JSONBIN_API_KEY не найден в переменных окружения.")
+if not JSONBIN_BIN_ID:
+    raise ValueError("Ошибка: JSONBIN_BIN_ID не найден в переменных окружения.")
 
 DATA_FILE = "user_data.xml"
-
 FACTIONS = ["белые", "красные", "синие", "зеленые", "чёрные", "прозрачные"]
-
 
 # --- ТЕКСТОВЫЕ КОНСТАНТЫ ---
 INFO_TEXT = (
@@ -70,7 +68,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- ГЛОБАЛЬНЫЙ МЕНЕДЖЕР И ОБРАБОТЧИК АКТИВНОСТИ ---
-user_manager = UserDataManager(DATA_FILE)
+user_manager = UserDataManager(api_key=  JSONBIN_API_KEY, bin_id = JSONBIN_BIN_ID)
 
 async def track_user_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user:
@@ -82,7 +80,7 @@ GAMES = {
     "roulette": RouletteGame("roulette", "в Рулетку", user_manager),
     "coinflip": CoinFlipGame("coinflip", "в Монетку", user_manager),
     "blackjack": BlackjackGame("blackjack", "в Блэкджек", user_manager),
-    "academic_race": AcademicRaceGame("academic_race", "в Гонки Академиков", user_manager),
+    "academic_race": AcademicRaceGame("academic_race", "в Гонки Академиков", user_manager), # <-- ДОБАВЛЕНО
 }
 # --- КОНЕЦ НОВОГО БЛОКА ---
 
@@ -112,17 +110,19 @@ def get_games_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(f"💰 Ваш баланс: {balance:,} дукатов", callback_data='do_nothing')],
         [InlineKeyboardButton("💪 Работать (+5,000)", callback_data='game:work')],
-        [InlineKeyboardButton("🎓 Гонки академиков", callback_data='game:start:academic_race')],
+        # Кнопки теперь ведут на универсальный обработчик
+        [InlineKeyboardButton("🎓 Гонки академиков", callback_data='game:start:academic_race')], # <-- ИЗМЕНЕНО
         [InlineKeyboardButton("🎲 Играть в Кости", callback_data='game:start:dice')],
         [InlineKeyboardButton("🎡 Играть в Рулетку", callback_data='game:start:roulette')],
-        [InlineKeyboardButton("🪙 Играть в Монетку", callback_data='game:start:coinflip')],
-        [InlineKeyboardButton("🃏 Играть в Блэкджек", callback_data='game:start:blackjack')],
+        [InlineKeyboardButton("🪙 Играть в Монетку", callback_data='game:start:coinflip')], # <-- ДОБАВЛЕНА ЭТА СТРОКА
+        [InlineKeyboardButton("🃏 Играть в Блэкджек", callback_data='game:start:blackjack')], # <-- ДОБАВЛЕНО
         [InlineKeyboardButton("⬅️ Назад", callback_data='nav:main')]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- ГЕНЕРАТОР ОТЧЕТА ---
+# --- ГЕНЕРАТОР ОТЧЕТА (без изменений) ---
 def generate_public_stats_report() -> str:
+    # ... (код функции без изменений)
     users = user_manager.get_all_users()
     total_users = len(users)
     total_interactions = sum(user.get('interaction_count', 0) for user in users.values())
@@ -144,7 +144,7 @@ def generate_public_stats_report() -> str:
             report += f"- {faction.capitalize()}: {count} подписчиков\n"
     return report
 
-# --- ОСНОВНЫЕ ОБРАБОТЧИКИ ---
+# --- ОСНОВНЫЕ ОБРАБОТЧИКИ КОМАНД И КНОПОК (без существенных изменений) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = get_main_keyboard()
     if update.message:
@@ -158,9 +158,11 @@ async def nav_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = query.from_user.id
     nav_target = query.data.split(':')[1]
 
+    # Сброс игрового состояния при выходе из раздела игр
     if nav_target != 'games':
         context.user_data.pop('game_state', None)
     elif nav_target == 'games':
+        # --- НОВЫЙ БЛОК: ПРОВЕРКА БАНКРОТСТВА ---
         if user_manager.check_and_apply_bankruptcy(user_id):
             await query.answer(
                 "Ваш баланс был слишком мал и был восстановлен до 100 дукатов по программе банкротства.",
@@ -174,12 +176,14 @@ async def nav_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown', disable_web_page_preview=True)
 
+# ... (subscription_handler, show_public_stats, stata_command, say_command, contact_admin_start_handler остаются без изменений)
 async def subscription_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     faction = query.data.split(':')[1]
     user_manager.set_user_faction(user_id, faction)
+
     await query.message.delete()
     menu_button = InlineKeyboardButton("⬅️ Назад к новостям", callback_data='nav:news')
     reply_markup = InlineKeyboardMarkup([[menu_button]])
@@ -205,11 +209,11 @@ async def show_public_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     reply_markup = InlineKeyboardMarkup([[menu_button]])
     await query.edit_message_text(text=report, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ... (Остальные обработчики без изменений) ...
 async def stata_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
 
-    if str(user_id) == ADMIN_ID: # Сравнение строк, так как getenv возвращает строку
+    if user_id == ADMIN_ID:
+        # Админская логика
         period_arg = context.args[0].lower() if context.args else 'вся'
         now = datetime.now()
         period_map = {
@@ -246,6 +250,7 @@ async def stata_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(report, parse_mode='Markdown')
 
     else:
+        # Пользовательская логика
         is_allowed, time_left = user_manager.check_stats_cooldown(user_id)
         if not is_allowed:
             minutes, seconds = divmod(int(time_left.total_seconds()), 60)
@@ -256,7 +261,7 @@ async def stata_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(report, parse_mode='Markdown')
 
 async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if str(update.effective_user.id) != ADMIN_ID:
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Эта команда доступна только администратору.")
         return
     args = context.args
@@ -304,8 +309,9 @@ async def contact_admin_start_handler(update: Update, context: ContextTypes.DEFA
     )
 
 
-# --- ИГРОВЫЕ ОБРАБОТЧИКИ ---
+# --- <<< ОБНОВЛЕННЫЕ ИГРОВЫЕ ОБРАБОТЧИКИ >>> ---
 async def work_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Этот обработчик остается без изменений
     query = update.callback_query
     user_id = query.from_user.id
     is_allowed, time_left = user_manager.check_work_cooldown(user_id)
@@ -319,41 +325,71 @@ async def work_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.answer(f"Вы слишком устали. Возвращайтесь через {minutes} мин {seconds} сек.", show_alert=True)
 
 async def game_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Универсальный обработчик для входа в любую игру.
+    Логика разделена для игр, требующих ставку, и игр без ставки.
+    """
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+
+    # --- Шаг 1: Базовая настройка ---
     parts = query.data.split(':')
     game_id = parts[2]
     game = GAMES.get(game_id)
+
+    # Если игрок нажал "Новая ставка", сбрасываем ее
     if len(parts) > 3 and parts[3] == 'new':
         context.user_data.pop('current_bet', None)
+
+    # --- Шаг 2: Проверяем, требует ли игра ставку (используем наш новый флаг!) ---
     if game.requires_bet:
+        # --- ЛОГИКА ДЛЯ ИГР СО СТАВКАМИ (Кости, Рулетка и т.д.) ---
         context.user_data['game_state'] = f'awaiting_bet:{game_id}'
         balance = user_manager.get_user_balance(user_id)
         current_bet = context.user_data.get('current_bet', 0)
+
         text = game.get_rules_text(balance, current_bet)
         keyboard = game.get_game_keyboard(context)
-        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='Markdown')
+
+        await query.edit_message_text(
+            text=text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        # Если ставки еще нет, сохраняем ID сообщения, чтобы его потом можно было удалить
         if current_bet == 0:
             sent_message = await query.get_message()
             context.user_data['prompt_message_id'] = sent_message.message_id
+
     else:
-        context.user_data['game_state'] = f'in_game_menu:{game_id}'
+        # --- ЛОГИКА ДЛЯ ИГР БЕЗ СТАВОК (Гонки академиков) ---
+        context.user_data['game_state'] = f'in_game_menu:{game_id}' # Нейтральный статус
+
         balance = user_manager.get_user_balance(user_id)
-        text = game.get_rules_text(balance, 0)
-        keyboard = game.get_game_keyboard(context)
-        await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode='Markdown')
+        text = game.get_rules_text(balance, 0) # Ставка равна 0
+        keyboard = game.get_game_keyboard(context) # Клавиатура с кнопкой "Начать!"
+
+        await query.edit_message_text(
+            text=text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
 
 async def game_modify_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Универсальный обработчик для изменения ставки (x2, All-in)."""
     query = update.callback_query
     user_id = query.from_user.id
-    parts = query.data.split(':')
+
+    parts = query.data.split(':') # game:modify:dice:multiply:2 или game:modify:roulette:allin
     game_id, action = parts[2], parts[3]
     game = GAMES.get(game_id)
+
     current_bet = context.user_data.get('current_bet', 0)
     if current_bet <= 0:
         await query.answer("Сначала нужно сделать ставку!", show_alert=True)
         return
+
     balance = user_manager.get_user_balance(user_id)
     new_bet = 0
     if action == 'multiply':
@@ -361,32 +397,55 @@ async def game_modify_bet_handler(update: Update, context: ContextTypes.DEFAULT_
         new_bet = current_bet * multiplier
     elif action == 'allin':
         new_bet = balance
+
     if new_bet > balance:
         await query.answer(f"Недостаточно средств. Ваш баланс: {balance:,}", show_alert=True)
-        new_bet = current_bet
+        new_bet = current_bet # Не меняем ставку, если не хватает
+
     if new_bet == current_bet and action != 'allin':
          await query.answer("Ставка не изменилась.", show_alert=True)
          return
+
     context.user_data['current_bet'] = new_bet
     await query.answer(f"Ставка изменена на {new_bet:,}")
     await query.edit_message_reply_markup(reply_markup=game.get_game_keyboard(context))
 
 async def game_play_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Универсальный обработчик для основного действия игры.
+    Теперь он НЕ проверяет баланс, а полностью делегирует это классу игры.
+    """
     query = update.callback_query
-    await query.answer()
+    await query.answer() # Сразу отвечаем на колбэк, чтобы кнопка не "зависала"
+
     game_id = query.data.split(':')[2]
     game = GAMES.get(game_id)
+
+    # Проверки на наличие ставки и ее корректность теперь полностью
+    # находятся внутри метода .play() каждого конкретного игрового класса.
+    # Это правильно с точки зрения архитектуры.
     if game:
         await game.play(update, context)
     else:
         logger.warning(f"Получен вызов для несуществующей игры: {game_id}")
 
-# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ТЕКСТА ---
+async def shutdown_handler(application: Application) -> None:
+    """Вызывается при остановке бота для финального сохранения данных."""
+    logger.info("Сигнал остановки получен. Выполняю финальное сохранение данных...")
+    user_manager.force_save()
+    logger.info("Финальное сохранение завершено. Бот выключен.")
+
+# --- ОБНОВЛЕННЫЙ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ТЕКСТА ---
 async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Маршрутизирует все входящие текстовые сообщения.
+    Теперь включает 4 маршрута: ответ в игре, ставка, сообщение админу и обработчик для всех остальных сообщений.
+    """
     user_id = update.effective_user.id
     game_state = context.user_data.get('game_state', '')
     contact_state = context.user_data.get('contact_state')
 
+    # Маршрут 1: Пользователь отвечает в игре (например, в Гонках)
     if game_state.startswith('awaiting_answer:'):
         game_id = game_state.split(':')[1]
         game = GAMES.get(game_id)
@@ -394,25 +453,32 @@ async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE
             await game.handle_answer(update, context)
         return
 
+    # Маршрут 2: Пользователь делает ставку в игре
     elif game_state.startswith('awaiting_bet:'):
         game_id = game_state.split(':')[1]
         game = GAMES.get(game_id)
         if not game: return
+
         prompt_message_id = context.user_data.pop('prompt_message_id', None)
-        try: bet_amount = int(''.join(filter(str.isdigit, update.message.text)))
+        try:
+            bet_amount = int(''.join(filter(str.isdigit, update.message.text)))
         except (ValueError, TypeError):
             await update.message.reply_text("Пожалуйста, введите ставку в виде числа.")
             return
+
         balance = user_manager.get_user_balance(user_id)
         if not (0 < bet_amount <= balance):
             await update.message.reply_text(f"Ставка должна быть больше нуля и не превышать ваш баланс ({balance:,} дукатов).")
             return
+
         context.user_data['current_bet'] = bet_amount
         context.user_data['game_state'] = 'bet_placed'
+
         await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
         if prompt_message_id:
             try: await context.bot.delete_message(chat_id=user_id, message_id=prompt_message_id)
             except Exception as e: logger.warning(f"Не удалось удалить сообщение {prompt_message_id}: {e}")
+
         await context.bot.send_message(
             chat_id=user_id,
             text=game.get_rules_text(balance, bet_amount),
@@ -421,13 +487,16 @@ async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    # Маршрут 3: Пользователь пишет админу
     elif contact_state == 'awaiting_admin_message':
         user = update.effective_user
         user_text = update.message.text
         contact_type = context.user_data.get('contact_type', 'message')
         username_str = f"@{user.username}" if user.username else f"ID: `{user.id}`"
+
         header = "❗️ *Заказ!*\n\n" if contact_type == 'order' else "✉️ *Письмо!*\n\n"
         admin_message = f"{header}Пользователь {username_str} пишет:\n\n*{user_text}*"
+
         try:
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message, parse_mode='Markdown')
             menu_button = InlineKeyboardButton("⬅️ Вернуться в меню", callback_data='nav:main')
@@ -438,73 +507,70 @@ async def text_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE
         finally:
             context.user_data.pop('contact_state', None)
             context.user_data.pop('contact_type', None)
-        return
+        return # Важно добавить return
 
+    # --- НОВЫЙ БЛОК: Маршрут 4 (Заглушка) ---
+    # Этот блок сработает, если ни одно из предыдущих условий не выполнилось.
     else:
+        # На всякий случай сбрасываем любые "зависшие" игровые состояния
         context.user_data.pop('game_state', None)
         context.user_data.pop('current_bet', None)
+
         await update.message.reply_text(
             "🤖 Я не совсем понимаю, что вы имеете в виду. "
             "Возможно, вы хотели вернуться в главное меню?",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard() # Показываем клавиатуру главного меню
         )
 
-### RENDER ###
-app = Flask('')
-
-@app.route('/')
-def home():
-    """Эта функция будет отвечать на HTTP-запросы Render."""
-    return "I'm alive"
-
-def run_server():
-    """Запускает веб-сервер."""
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
 def main() -> None:
-    # --- ШАГ 1: Запускаем веб-сервер в фоновом потоке ---
-    # Он простой и не требует быть главным.
-    # daemon=True означает, что этот поток автоматически завершится, когда завершится основной.
-    server_thread = Thread(target=run_server)
-    server_thread.daemon = True
-    server_thread.start()
-    print("Веб-сервер для Render запущен в фоновом потоке...")
+        # Настраиваем более устойчивые сетевые параметры
+    # connect_timeout - время на установку соединения
+    # read_timeout - время на ожидание ответа от сервера (должно быть больше polling_timeout)
+    # pool_timeout - время жизни соединений в пуле
+    request = HTTPXRequest(
+        connect_timeout=10.0,
+        read_timeout=60.0,
+        pool_timeout=None  # None означает отсутствие тайм-аута для пула
+    )
 
-    # --- ШАГ 2: Запускаем бота в основном (главном) потоке ---
-    # Теперь он может делать всё, что ему нужно, включая обработку сигналов.
-    try:
-        print("Инициализация приложения Telegram в основном потоке...")
-        request = HTTPXRequest(connect_timeout=10.0, read_timeout=60.0, pool_timeout=None)
-        application = (Application.builder().token(TOKEN).job_queue(JobQueue()).request(request).build())
-        
-        print("Добавление обработчиков...")
-        # ... (здесь все ваши application.add_handler)
-        application.add_handler(TypeHandler(Update, track_user_activity), group=-1)
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("say", say_command))
-        application.add_handler(CommandHandler("stata", stata_command))
-        application.add_handler(CallbackQueryHandler(nav_handler, pattern='^nav:'))
-        application.add_handler(CallbackQueryHandler(subscription_handler, pattern='^sub:'))
-        application.add_handler(CallbackQueryHandler(show_public_stats, pattern='^get_public_stats$'))
-        application.add_handler(CallbackQueryHandler(contact_admin_start_handler, pattern='^contact:'))
-        application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern='^do_nothing$'))
-        application.add_handler(CallbackQueryHandler(work_handler, pattern='^game:work$'))
-        application.add_handler(CallbackQueryHandler(game_start_handler, pattern=r'^game:start:'))
-        application.add_handler(CallbackQueryHandler(game_modify_bet_handler, pattern=r'^game:modify:'))
-        application.add_handler(CallbackQueryHandler(game_play_handler, pattern=r'^game:play:'))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_router))
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .job_queue(JobQueue())
+        .request(request)
+        .post_shutdown(shutdown_handler)
+        .build()
+    )
 
-        print("Бот запущен в режиме polling...")
-        application.run_polling()
+    application.add_handler(TypeHandler(Update, track_user_activity), group=-1)
 
-    except Exception as e:
-        print("!!! КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ БОТА !!!")
-        print(f"Тип ошибки: {type(e).__name__}")
-        print(f"Сообщение: {e}")
-        import traceback
-        traceback.print_exc()
+    # Команды
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("say", say_command))
+    application.add_handler(CommandHandler("stata", stata_command))
 
-# --- Точка входа в программу ---
+    # Навигация и основные кнопки
+    application.add_handler(CallbackQueryHandler(nav_handler, pattern='^nav:'))
+    application.add_handler(CallbackQueryHandler(subscription_handler, pattern='^sub:'))
+    application.add_handler(CallbackQueryHandler(show_public_stats, pattern='^get_public_stats$'))
+    application.add_handler(CallbackQueryHandler(contact_admin_start_handler, pattern='^contact:'))
+    application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern='^do_nothing$'))
+
+    # Игровые обработчики (теперь полностью универсальные)
+    application.add_handler(CallbackQueryHandler(work_handler, pattern='^game:work$'))
+    application.add_handler(CallbackQueryHandler(game_start_handler, pattern=r'^game:start:'))
+    application.add_handler(CallbackQueryHandler(game_modify_bet_handler, pattern=r'^game:modify:'))
+    application.add_handler(CallbackQueryHandler(game_play_handler, pattern=r'^game:play:'))
+
+    # Универсальный обработчик текста
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_router))
+
+    # --- ЗАПУСК АВТОСОХРАНЕНИЯ ПОСЛЕ СОЗДАНИЯ ПРИЛОЖЕНИЯ ---
+    # Мы передаем в менеджер очередь задач из нашего приложения.
+    user_manager.start_autosave(application.job_queue, interval_seconds=3600) # 3600 секунд = 1 час
+
+    print("Бот запущен...")
+    application.run_polling()
+
 if __name__ == "__main__":
     main()
